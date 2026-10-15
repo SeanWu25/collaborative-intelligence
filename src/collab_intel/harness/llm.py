@@ -5,6 +5,9 @@
   anything in VLLM_ENDPOINTS local vLLM server, OpenAI-compatible (free); default map below,
                             override with HARNESS_VLLM_ENDPOINTS='{"Qwen/Qwen3-8B":"http://localhost:8002/v1"}'
                             (any OpenAI-compatible server; HARNESS_VLLM_API_KEY if it needs a key)
+  anything in HARNESS_OPENAI_COMPAT, gemini-*, openrouter:<model id>
+                            a hosted OpenAI-compatible provider, each model with its own base URL, key variable and
+                            request extras (OPENAI_COMPAT below; gemini-* uses GEMINI_API_KEY, openrouter: OPENROUTER_API_KEY)
 
 Messages use one neutral format so the episode code never sees provider details:
   {"role": "user", "content": str}
@@ -77,6 +80,18 @@ if os.environ.get("HARNESS_FRONTIER_EFFORT"):
     for _m in ("claude-opus-5-5", "claude-fable-5-1"):
         MODEL_EXTRAS[_m] = {"output_config": {"effort": os.environ["HARNESS_FRONTIER_EFFORT"]}}
     RESPONSES_REASONING["gpt-6-astra"] = {"effort": os.environ["HARNESS_FRONTIER_EFFORT"]}
+# A new OpenAI model at the lightest reasoning setting its API offers (2026-10-14): HARNESS_OPENAI_EFFORT='{"gpt-6-luna":
+# "none"}' sends that reasoning_effort on chat completions and the same effort on the Responses API (used when the model
+# rejects function tools with reasoning on chat completions). Without an entry a model runs at its API default, which for
+# several recent models is not the lightest (gpt-6-luna and gpt-5.6-terra, probed 2026-10-14: the default is rejected
+# with tools on chat completions, so they moved to the Responses API at its default effort; both accept "none").
+# Recorded in run_config() when set.
+OPENAI_EFFORT: dict[str, str] = json.loads(os.environ.get("HARNESS_OPENAI_EFFORT", "") or "{}")
+for _m, _e in OPENAI_EFFORT.items():
+    RESPONSES_REASONING[_m] = {"effort": _e}
+# Prices for models the PRICES table does not list (USD per 1M tokens, input and output), e.g.
+# HARNESS_PRICES='{"gpt-5.5": [5, 30]}'; unlisted models count at (5, 25) in the usage log and the budget guard.
+PRICES.update({m: (float(p[0]), float(p[1])) for m, p in json.loads(os.environ.get("HARNESS_PRICES", "") or "{}").items()})
 VLLM_ENDPOINTS: dict[str, str] = json.loads(os.environ.get("HARNESS_VLLM_ENDPOINTS", "") or json.dumps({
     "Qwen/Qwen3-32B": "http://localhost:8000/v1", "Qwen/Qwen3-14B": "http://localhost:8001/v1",
     "Qwen/Qwen3-8B": "http://localhost:8002/v1"}))
@@ -88,6 +103,86 @@ AZURE_MODELS = [m for m in os.environ.get("AZURE_FOUNDRY_MODELS", "").split(",")
 # a "together:" prefix. Prices are looked up per call from the model list (cached) so the usage log and budget guard see them.
 TOGETHER_MODELS = [m for m in os.environ.get("TOGETHER_MODELS", "").split(",") if m.strip()]
 TOGETHER_BASE = "https://api.together.xyz/v1"
+# Hosted OpenAI-compatible providers (2026-10-14), for testing a new model without code changes. One entry per model name:
+#   HARNESS_OPENAI_COMPAT='{"<name>": {"base_url": "https://.../v1", "api_key_env": "<variable holding the key>",
+#                                      "model": "<the provider's model id, default the name>",
+#                                      "extra": {<request-body fields, e.g. "reasoning_effort": "low">},
+#                                      "price": [<USD per 1M input tokens>, <output>]}}'
+# An entry takes precedence over every other route, so it can also map a partner name (e.g. "Qwen/Qwen3-14B") to a hosted
+# copy. The request is a plain chat completion (messages, tools, max_tokens) plus "extra": none of the vLLM fields
+# (chat_template_kwargs) or provider-specific fields of the other routes. Unpriced models count at (5, 25) like other
+# unknown models. Two built-in presets, which an entry of the same name overrides key by key (_compat_preset): gemini-*
+# (Google's endpoint, GEMINI_API_KEY) and openrouter:<model id> (OPENROUTER_API_KEY), both at the lightest reasoning
+# setting the API offers, the leaderboard's rule. Every resolved entry is recorded in run_config() for the run's models.
+OPENAI_COMPAT: dict[str, dict[str, Any]] = json.loads(os.environ.get("HARNESS_OPENAI_COMPAT", "") or "{}")
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
+OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+_COMPAT_PRESET_PREFIXES = ("gemini-", "openrouter:")
+_compat_resolved: dict[str, dict[str, Any]] = {}
+_openrouter_models: dict[str, dict[str, Any]] = {}
+
+
+def _openrouter_lightest(model_id: str) -> dict[str, Any]:
+    """Price and lightest reasoning setting of an OpenRouter model, from its public model list (no key needed; fetched
+    once per process). OpenRouter's reasoning docs (read 2026-10-14): `reasoning: {"effort": "none"}` disables reasoning,
+    except where `reasoning.mandatory` is true (the model rejects it); `supported_efforts` lists the accepted efforts in
+    descending order. So: no field for a model without the reasoning parameter, "none" where reasoning can be turned off,
+    else the lowest supported effort (none sent when the model exposes no effort choice)."""
+    if not _openrouter_models and not dry_run():
+        try:
+            import requests
+            r = requests.get(f"{OPENROUTER_BASE}/models", timeout=60)
+            _openrouter_models.update({m["id"]: m for m in r.json()["data"]})
+        except Exception:  # noqa: BLE001
+            pass
+    m = _openrouter_models.get(model_id)
+    if m is None:
+        return {"catalog": "not in OpenRouter's model list (or the list was not fetched): the provider's default reasoning"}
+    out: dict[str, Any] = {"catalog": "openrouter.ai/api/v1/models"}
+    pr = m.get("pricing") or {}
+    try:
+        out["price"] = [float(pr["prompt"]) * 1e6, float(pr["completion"]) * 1e6]
+    except (KeyError, TypeError, ValueError):
+        pass
+    r = m.get("reasoning") or {}
+    if "reasoning" in (m.get("supported_parameters") or []):
+        if not r.get("mandatory"):
+            out["extra"] = {"reasoning": {"effort": "none"}}
+        elif r.get("supported_efforts"):
+            out["extra"] = {"reasoning": {"effort": r["supported_efforts"][-1]}}
+    return out
+
+
+def _compat_preset(model: str) -> dict[str, Any]:
+    """The built-in settings of a gemini-* or openrouter:<model id> name ({} for any other)."""
+    if model.startswith("gemini-"):
+        # Google's OpenAI-compatibility page (ai.google.dev/gemini-api/docs/openai, read 2026-10-14): reasoning_effort
+        # "minimal" is the lowest thinking level on every Gemini model (a model without a minimal level, e.g. Gemini 4
+        # Argon or 3.1 Pro, maps it to low, its lowest; thinking cannot be turned off on Gemini 3 or 2.5 Pro), and "none"
+        # turns thinking off on Gemini 2.5 Flash and Flash-Lite
+        return {"base_url": GEMINI_BASE, "api_key_env": "GEMINI_API_KEY",
+                "extra": {"reasoning_effort": "none" if model.startswith("gemini-2.5-flash") else "minimal"}}
+    if model.startswith("openrouter:"):
+        mid = model.removeprefix("openrouter:")
+        return {"base_url": OPENROUTER_BASE, "api_key_env": "OPENROUTER_API_KEY", "model": mid, **_openrouter_lightest(mid)}
+    return {}
+
+
+def openai_compat_config(model: str) -> dict[str, Any]:
+    """The resolved settings of a model on the hosted OpenAI-compatible route: its preset, then its HARNESS_OPENAI_COMPAT
+    entry key by key (cached; a dry run never fetches OpenRouter's model list)."""
+    if model in _compat_resolved:
+        return _compat_resolved[model]
+    entry = OPENAI_COMPAT.get(model) or {}
+    if not isinstance(entry, dict):
+        raise ValueError(f"HARNESS_OPENAI_COMPAT[{model!r}] must be an object with base_url, api_key_env, ...")
+    cfg = {**_compat_preset(model), **entry}
+    cfg.setdefault("model", model)
+    if not cfg.get("base_url"):
+        raise ValueError(f"HARNESS_OPENAI_COMPAT[{model!r}] has no base_url")
+    if not dry_run():
+        _compat_resolved[model] = cfg
+    return cfg
 # Fixed routes: a model name used throughout the project (run folders, tables) -> (provider, provider's model id). Since
 # 2026-09-29 DeepSeek-V4-Flash is served by Together (treated as the same model as the earlier Azure deployment, per the
 # authors); routes take precedence over AZURE_FOUNDRY_MODELS / TOGETHER_MODELS and are recorded in run_config().
@@ -212,9 +307,13 @@ _LOCK = threading.Lock()
 _clients: dict[str, Any] = {}
 
 
-def run_config() -> dict[str, Any]:
-    """Settings that affect model behaviour, recorded in every transcript for reproducibility."""
+def run_config(models: list[str] | None = None) -> dict[str, Any]:
+    """Settings that affect model behaviour, recorded in every transcript for reproducibility. `models` (the run's
+    models): those on the hosted OpenAI-compatible route add their resolved settings (`openai_compat`); the key is left
+    out when none is, so the record of every other run is unchanged."""
     from collab_intel.harness import judges
+    run_models = [*(models or []), judges.JUDGE_MODEL, judges.SECOND_RATER, judges.TIEBREAK_RATER]
+    compat = {m: openai_compat_config(m) for m in dict.fromkeys(run_models) if m and _is_compat(m)}
     return {"model_extras": MODEL_EXTRAS, "thinking_headroom": THINKING_HEADROOM,
             "vllm_thinking": VLLM_THINKING_DEFAULT, "vllm_endpoints": VLLM_ENDPOINTS,
             "judge_model": judges.JUDGE_MODEL, "second_rater": judges.SECOND_RATER, "model_routes": MODEL_ROUTES,
@@ -222,6 +321,7 @@ def run_config() -> dict[str, Any]:
             "judge_temperature_sent": {m: accepts_temperature(m) for m in (judges.JUDGE_MODEL, judges.SECOND_RATER) if m},
             "route_extra_body": ROUTE_EXTRA_BODY, "responses_reasoning": RESPONSES_REASONING, "thinks_by_default_prefixes": list(_THINKS_BY_DEFAULT_PREFIXES),
             "empty_retry_tokens": EMPTY_RETRY_TOKENS, "judge_max_tokens": judges.JUDGE_MAX_TOKENS,
+            **({"openai_compat": compat} if compat else {}), **({"openai_effort": OPENAI_EFFORT} if OPENAI_EFFORT else {}),
             # a dry run (HARNESS_DRY_RUN: canned replies, no model call) is marked so that it is never scored or resumed
             # as a real run (release audit USE-01 / DS-10, 2026-10-13); real runs carry no such key
             **({"dry_run": True} if dry_run() else {})}
@@ -257,6 +357,8 @@ class BudgetExceeded(RuntimeError):
 
 
 def provider_of(model: str) -> str:
+    if model in OPENAI_COMPAT:  # an explicit entry wins over every other route
+        return "openai_compat"
     if model in MODEL_ROUTES:
         return MODEL_ROUTES[model][0]
     if model.startswith("claude-"):
@@ -267,9 +369,35 @@ def provider_of(model: str) -> str:
         return "azure"
     if model in TOGETHER_MODELS or model.startswith("together:"):
         return "together"
+    if model.startswith(_COMPAT_PRESET_PREFIXES):
+        return "openai_compat"
     if model.startswith(("gpt-", "o1", "o3", "o4")):
         return "openai"
-    raise ValueError(f"unknown provider for model {model!r}")
+    raise ValueError(f"unknown provider for model {model!r} (claude-*, gpt-*, together:<id>, gemini-*, openrouter:<id>, "
+                     "or a name in HARNESS_OPENAI_COMPAT / HARNESS_VLLM_ENDPOINTS; docs/running.md)")
+
+
+def _is_compat(model: str) -> bool:
+    try:
+        return provider_of(model) == "openai_compat"
+    except ValueError:
+        return False
+
+
+# the environment variables each route reads (vllm: none); see missing_setup()
+_ROUTE_KEYS = {"anthropic": ("ANTHROPIC_API_KEY",), "openai": ("OPENAI_API_KEY",), "together": ("TOGETHER_API_KEY",),
+               "azure": ("AZURE_FOUNDRY_KEY", "AZURE_FOUNDRY_ENDPOINT"), "vllm": ()}
+
+
+def missing_setup(model: str) -> str | None:
+    """Why `model` cannot be called as configured (no route, a key not set), or None. For a run's up-front check."""
+    try:
+        provider = provider_of(model)
+        keys = (openai_compat_config(model).get("api_key_env"),) if provider == "openai_compat" else _ROUTE_KEYS[provider]
+    except ValueError as e:
+        return str(e)
+    unset = [k for k in keys if k and not os.environ.get(k)]
+    return f"{model}: {', '.join(unset)} not set (add it to .env)" if unset else None
 
 
 def model_slug(model: str) -> str:
@@ -278,6 +406,17 @@ def model_slug(model: str) -> str:
 
 def _client(provider: str, model: str = ""):
     key = provider if provider != "vllm" else f"vllm:{VLLM_ENDPOINTS[model]}"
+    if provider == "openai_compat":
+        cfg = openai_compat_config(model)
+        key = f"openai_compat:{cfg['base_url']}|{cfg.get('api_key_env')}"
+        if key not in _clients:
+            import openai
+            env = cfg.get("api_key_env")
+            k = os.environ.get(env) if env else "EMPTY"
+            if not k:
+                raise RuntimeError(f"{env} not set (add it to .env); it holds the key for {model}")
+            _clients[key] = openai.OpenAI(base_url=cfg["base_url"], api_key=k, max_retries=4, timeout=300.0)
+        return _clients[key]
     if key not in _clients:
         if provider == "anthropic":
             import anthropic
@@ -313,7 +452,10 @@ def _client(provider: str, model: str = ""):
 
 
 def api_model_id(model: str) -> str:
-    """The id sent to the provider (a routed name maps to the provider's id; a "together:" prefix is dropped)."""
+    """The id sent to the provider (a routed name maps to the provider's id; a "together:" prefix is dropped; a hosted
+    OpenAI-compatible model sends its entry's "model")."""
+    if _is_compat(model):
+        return openai_compat_config(model)["model"]
     return MODEL_ROUTES[model][1] if model in MODEL_ROUTES else model.removeprefix("together:")
 
 
@@ -334,7 +476,10 @@ def _together_price(model: str) -> tuple[float, float]:
 def cost_usd(model: str, usage: dict[str, int]) -> float:
     if provider_of(model) in ("vllm", "azure"):
         return 0.0
-    pin, pout = _together_price(model) if provider_of(model) == "together" else PRICES.get(model, (5.0, 25.0))
+    if provider_of(model) == "openai_compat" and openai_compat_config(model).get("price") is not None:
+        pin, pout = (float(x) for x in openai_compat_config(model)["price"])
+    else:
+        pin, pout = _together_price(model) if provider_of(model) == "together" else PRICES.get(model, (5.0, 25.0))
     inp = usage.get("input_tokens", 0)
     cr = usage.get("cache_read_input_tokens", 0) or 0
     cw = usage.get("cache_creation_input_tokens", 0) or 0
@@ -400,7 +545,9 @@ def _to_anthropic(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _to_openai(system: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _to_openai(system: str, messages: list[dict[str, Any]], echo: bool = False) -> list[dict[str, Any]]:
+    """`echo` (the hosted OpenAI-compatible route only): send back what the provider attached to its own reply for the next
+    request, `provider_echo` on an assistant message and `extra_content` on a tool call (_compat_echo)."""
     out: list[dict[str, Any]] = [{"role": "system", "content": system}]
     for m in messages:
         if m["role"] == "user":
@@ -409,8 +556,11 @@ def _to_openai(system: str, messages: list[dict[str, Any]]) -> list[dict[str, An
             msg: dict[str, Any] = {"role": "assistant", "content": m.get("content") or None}
             if m.get("tool_calls"):
                 msg["tool_calls"] = [{"id": tc["id"], "type": "function",
-                                      "function": {"name": tc["name"], "arguments": json.dumps(tc["input"])}}
+                                      "function": {"name": tc["name"], "arguments": json.dumps(tc["input"])},
+                                      **({"extra_content": tc["extra_content"]} if echo and tc.get("extra_content") else {})}
                                      for tc in m["tool_calls"]]
+                if echo and m["tool_calls"][0].get("provider_echo"):
+                    msg.update(m["tool_calls"][0]["provider_echo"])
             out.append(msg)
         elif m["role"] == "tool_results":
             for r in m["results"]:
@@ -485,6 +635,25 @@ def _responses_call(client: Any, model: str, system: str, messages: list[dict[st
     usage = {"input_tokens": getattr(u, "input_tokens", 0) or 0, "output_tokens": getattr(u, "output_tokens", 0) or 0}
     stop = "tool_calls" if tool_calls else (getattr(resp, "status", None) or "stop")
     return text, tool_calls, stop, usage, resp
+
+
+def _compat_echo(message: Any, tool_calls: list[dict[str, Any]]) -> None:
+    """Hosted OpenAI-compatible route: keep what a provider attaches to a reply for the model's next request in the same
+    turn (sent back by _to_openai with echo=True). Gemini 3 puts a thought signature on its tool calls
+    (tool_calls[].extra_content.google.thought_signature) and answers the next request with HTTP 400 when it is missing;
+    OpenRouter returns reasoning_details on the message, to be sent back with tool calls. The message-level fields ride on
+    the first tool call (`provider_echo`), since only a reply with tool calls is followed by another request in its turn.
+    A tool call without an id gets one, so its result can name it."""
+    for tc in tool_calls:
+        tc["id"] = tc["id"] or f"call_{uuid.uuid4().hex[:16]}"
+    raw = getattr(message, "tool_calls", None) or []
+    for tc, r in zip(tool_calls, raw):
+        ec = (getattr(r, "model_extra", None) or {}).get("extra_content")
+        if ec:
+            tc["extra_content"] = ec
+    rd = (getattr(message, "model_extra", None) or {}).get("reasoning_details")
+    if rd and tool_calls:
+        tool_calls[0]["provider_echo"] = {"reasoning_details": rd}
 
 
 def _tools_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -579,7 +748,7 @@ def _call_once(model: str, provider: str, system: str, messages: list[dict[str, 
         req_id = getattr(resp, "_request_id", None)
     else:
         client = _with_timeout(_client(provider, model), timeout)
-        kwargs = {"model": api_model_id(model), "messages": _to_openai(system, messages)}
+        kwargs = {"model": api_model_id(model), "messages": _to_openai(system, messages, echo=provider == "openai_compat")}
         if tools:
             kwargs["tools"] = _tools_openai(tools)
         if provider == "vllm":
@@ -595,8 +764,17 @@ def _call_once(model: str, provider: str, system: str, messages: list[dict[str, 
                 for msg in kwargs["messages"]:
                     if msg["role"] == "assistant" and msg.get("content") is None:
                         msg["content"] = ""
+        elif provider == "openai_compat":
+            kwargs["max_tokens"] = budget
+            cfg = openai_compat_config(model)
+            if cfg.get("extra"):
+                kwargs["extra_body"] = cfg["extra"]
+                extra_log["extra_body"] = cfg["extra"]
         else:
             kwargs["max_completion_tokens"] = budget
+            if model in OPENAI_EFFORT:
+                kwargs["reasoning_effort"] = OPENAI_EFFORT[model]
+                extra_log["reasoning_effort"] = OPENAI_EFFORT[model]
         if temperature is not None:
             kwargs["temperature"] = temperature
         resp = None
@@ -642,6 +820,8 @@ def _call_once(model: str, provider: str, system: str, messages: list[dict[str, 
                     except (json.JSONDecodeError, ValueError):
                         args = {"_raw": raw_args}
                 tool_calls.append({"id": tc.id, "name": tc.function.name, "input": args})
+            if provider == "openai_compat":
+                _compat_echo(m, tool_calls)
             if model in _HARMONY_LEAK and not tool_calls and (fixed := _repair_harmony(text)) is not None:
                 text, leaked, tool_calls = fixed
                 reasoning = "\n\n".join(x for x in (reasoning, leaked) if x)
@@ -649,6 +829,10 @@ def _call_once(model: str, provider: str, system: str, messages: list[dict[str, 
             stop = resp.choices[0].finish_reason
             u = resp.usage
             usage = {"input_tokens": getattr(u, "prompt_tokens", 0) or 0, "output_tokens": getattr(u, "completion_tokens", 0) or 0}
+            if provider == "openai_compat":
+                # some providers leave thinking tokens out of completion_tokens but count them in total_tokens (and bill
+                # them as output): the larger of the two is logged as output
+                usage["output_tokens"] = max(usage["output_tokens"], (getattr(u, "total_tokens", 0) or 0) - usage["input_tokens"])
             req_id = getattr(resp, "id", None)
     c = cost_usd(model, usage)
     out = {"text": text, "tool_calls": tool_calls, "stop_reason": stop, "usage": usage, "cost_usd": c, "model": model,
