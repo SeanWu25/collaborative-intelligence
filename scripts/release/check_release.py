@@ -154,7 +154,8 @@ def main() -> int:
                         ("ImpossibleBench citations", ["scripts/release/annotate_impossiblebench.py", "--check"]),
                         ("FDA records de-named", ["scripts/release/dename_fda.py", "--check"]),
                         ("notes neutralised", ["scripts/release/neutralise_notes.py", "--check"]),
-                        ("GPQA archive", ["scripts/release/pack_gpqa.py", "check"])):
+                        ("GPQA archive", ["scripts/release/pack_gpqa.py", "check"]),
+                        ("README figures", ["scripts/release/make_readme_figures.py", "--check"])):
         code, last = run([str(ROOT / args[0]), *args[1:]])
         results.append((label, code == 0, last))
     packed = gpqa_packed(ROOT)

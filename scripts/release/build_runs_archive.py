@@ -250,7 +250,7 @@ def main() -> int:
         summary.update(zip=str(zpath), zip_bytes=zpath.stat().st_size, zip_sha256=digest)
     print(json.dumps(summary, indent=1))
     print("Next, when the archive is published (Zenodo or Hugging Face): set ARCHIVE_URL and ARCHIVE_SHA256 in "
-          "scripts/fetch_runs.py and say where it is in README.md, results/README.md (scripts/leaderboard.py), "
+          "scripts/fetch_runs.py and say where it is in docs/running.md, results/README.md (scripts/leaderboard.py), "
           "results/transcripts/README.md and docs/datacard.md, which now say it is not published yet.")
     return 0
 

@@ -405,10 +405,10 @@ ethics, company engineering blogs and documentation, and the Django weblog. They
 to document where a scenario's facts come from; their owners keep all rights. Two longer quotations were trimmed to
 short ones before the release (see "Pending decision", item 1).
 
-## 6. Figure
+## 6. Figures
 
-The icons in `docs/assets/overview.png` are from Font Awesome Free (<https://fontawesome.com>), set with the LaTeX
-`fontawesome5` package: Font Awesome Free icons are licensed CC BY 4.0, its fonts SIL OFL 1.1.
+The README's figures (`docs/assets/readme/`) are drawn from the results files by `scripts/release/make_readme_figures.py`
+and use no third-party material.
 
 ## 7. Non-commercial subset (CC BY-NC-SA 4.0)
 
