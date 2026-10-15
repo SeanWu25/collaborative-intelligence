@@ -408,7 +408,10 @@ short ones before the release (see "Pending decision", item 1).
 ## 6. Figures
 
 The README's figures (`docs/assets/readme/`) are drawn from the results files by `scripts/release/make_readme_figures.py`
-and use no third-party material; the logo is the project's own.
+and use no third-party material; the logo is the project's own. The Stanford wordmark
+(`docs/assets/readme/stanford-light.svg`, and `stanford-dark.svg`, the same mark in white for dark backgrounds) is from
+Wikimedia Commons, File:Stanford wordmark (2012).svg (public domain as a text logo); it is a trademark of Stanford
+University and identifies the authors' institution only.
 
 ## 7. Non-commercial subset (CC BY-NC-SA 4.0)
 

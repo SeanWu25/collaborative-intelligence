@@ -9,6 +9,12 @@
 
 **A benchmark for AI agents as teammates.**
 
+<sub>From the <b>Zou Group</b> at</sub><br>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme/stanford-dark.svg">
+  <img src="docs/assets/readme/stanford-light.svg" width="124" height="26" alt="Stanford University">
+</picture>
+
 [**🌐 Website**](https://seanwu25.github.io/collaborative-intelligence-site/)
 
 </div>
