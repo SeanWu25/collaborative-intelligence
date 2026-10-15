@@ -90,7 +90,7 @@ docs/                        design, one page per dimension, analyses, data card
 tests/                       harness and benchmark checks (no API key needed)
 ```
 
-The README's leaderboard chart is drawn from the results files by `scripts/release/make_readme_figures.py`.
+The README's figures are drawn from the results files by `scripts/release/make_readme_figures.py`.
 
 ## The run archive
 
