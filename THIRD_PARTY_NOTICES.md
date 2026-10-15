@@ -407,8 +407,8 @@ short ones before the release (see "Pending decision", item 1).
 
 ## 6. Figures
 
-The README's figures (`docs/assets/readme/`) are drawn from the results files by `scripts/release/make_readme_figures.py`
-and use no third-party material.
+The README's leaderboard chart (`docs/assets/readme/`) is drawn from the results files by
+`scripts/release/make_readme_figures.py` and uses no third-party material.
 
 ## 7. Non-commercial subset (CC BY-NC-SA 4.0)
 

@@ -1,6 +1,6 @@
 # Showcase transcripts
 
-Runs quoted in the README, the dimension pages and the website, one folder per dimension / scenario / model. Each run
+Runs quoted in the dimension pages and on the website, one folder per dimension / scenario / model. Each run
 is kept twice: the full record (`.json`: every message, tool call, judge label and the final state) and a readable
 version (`.md`). Model folders use the name the results use, with `/` written as `__` and `:` as `_`.
 

@@ -7,8 +7,8 @@ added later, same set, settings and scoring), results/taking_over_results.json a
 The headline is the score over all scenarios, the released and the held-out ones (`heldout.all` in the results files,
 which scripts/score.py computes from the released runs and results/heldout_aggregates.json); the tables rank by it and
 show the Public (released scenarios, `overall`) and Private (held-out scenarios, `heldout.private`) scores beside it.
-Writes results/README.md and replaces the block between the leaderboard markers in README.md and the results block of
-each card in docs/dimensions/, so the numbers on those pages are always the scored ones. results/README.md ends with
+Writes results/README.md and replaces the results block of each card in docs/dimensions/ (and the block between the
+leaderboard markers in README.md, if it has them), so the numbers on those pages are always the scored ones. results/README.md ends with
 the licences, the model-output notice and the benchmark's canary string.
 """
 from __future__ import annotations
